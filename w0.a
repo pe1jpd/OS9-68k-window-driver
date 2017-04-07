@@ -1,0 +1,57 @@
+            nam     w0
+            ttl     w0 device descriptor (c) 2010 BdJ
+
+            use     defsfile
+
+Edition     equ     1
+Type_Lang   set     (Devic<<8)+0
+Attr_Rev    set     (ReEnt<<8)+0
+StackSz     equ     0
+
+            psect   w0,Type_Lang,Attr_Rev,Edition,StackSz,0
+
+            dc.l    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    Exec_+Updat_
+            dc.w    FileMgr
+            dc.w    DevDrv
+            dc.w    0
+            dc.w    0,0,0,0
+            dc.w    LastOpt-*
+
+Options     dc.b    DT_SCF
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.b    0
+            dc.w    Name
+            dc.b    $20
+            dc.b    $ff
+            dc.b    0
+            dc.b    0
+LastOpt
+
+Name        dc.w    "w0",0
+FileMgr     dc.b    "scf",0
+DevDrv      dc.b    "windrv",0
+
+            ends
