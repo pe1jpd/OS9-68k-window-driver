@@ -1,0 +1,724 @@
+
+            nam     windrv
+            ttl     window driver (c) 2010 BdJ
+
+            use     defsfile
+
+Edition     equ     1
+TypLang     set     (Drivr<<8)+Objct
+AttrRev     set     (ReEnt+SupStat<<8)+0
+StackSz     equ     0
+
+screen      equ     $100000
+
+*   content of  windat  module
+sync        equ     0
+ctrl        equ     2
+fontadr     equ     4
+fontwidth   equ     8
+fontheight  equ     10
+winlist     equ     12      1 byte/window, 16 windows
+winmode     equ     28
+winvsect    equ     44
+
+            psect   windrv,TypLang,AttrRev,Edition,StackSz,Entry
+
+            vsect
+wdatahdr    ds.l    1
+wdataptr    ds.l    1
+winnr       ds.w    1
+focus       ds.w    1
+
+winadr      ds.l    1
+contentadr  ds.l    1
+winx        ds.w    1               abs left of window
+winy        ds.w    1               abs top of window
+width       ds.w    1               width of the window incl border in bytes
+height      ds.w    1               height window incl border in bytes
+winfcol     ds.w    1
+winbcol     ds.w    1
+border      ds.w    1
+
+col         ds.w    1               current col in content
+row         ds.w    1               current row in content
+maxcol      ds.w    1               content width in cols
+maxrow      ds.w    1               content height in rows
+
+miradr      ds.l    1
+mirlen      ds.l    1
+
+bufptr      ds.l    1
+bufcnt      ds.w    1
+parcnt      ds.w    1
+funptr      ds.l    1
+buf         ds.w    20
+            ends
+
+Entry       dc.w    Init
+            dc.w    Read
+            dc.w    Write
+            dc.w    GetStat
+            dc.w    SetStat
+            dc.w    Term
+            dc.w    Trap
+Trap        equ     0
+
+Init        bsr     linkwdata
+            bcs.s   init9
+            cmpi    #$1234,sync(a5)
+            beq.s   init1
+            bsr.s   clrscr
+            bsr     initstack
+            move    #$1234,sync(a5) 
+init1       bsr     loadfont
+            bcs.s   init9
+            bsr     initwin
+            lea.l   buf(a1),a0
+            move.l  a0,bufptr(a1)
+            moveq   #0,d1
+init9       rts
+
+linkwdata   movem.l a0-a4/a6,-(sp)
+            move.l  a2,a6
+            move    #0,d0               (Data<<8),d0
+            lea.l   wdatastr(pc),a0
+            os9     F$Link
+            bcc.b   linkw1
+            lea.l   wdatastr(pc),a0
+            move.l  #$1000,d0           #$1000,d0
+            move    #$8080,d1           (ReEnt<<8)+0,d1
+            move    #$777,d2
+            move    #1024,d3            type/language
+            os9     F$DatMod
+            bcs.s   linkw2
+linkw1      move.l  a1,a5
+            move.l  a5,wdataptr(a6)
+            move.l  a2,wdatahdr(a6)
+linkw2      movem.l (sp)+,a0-a4/a6
+            rts
+
+wdatastr    dc.b    "windat",0
+            align
+
+clrscr      movem.l d7/a0,-(sp)
+            lea.l   screen,a0
+            moveq   #0,d0
+            move    #$10000-1,d7
+clr1        move    d0,(a0)+
+            dbra    d7,clr1
+            movem.l (sp)+,d7/a0
+            rts
+
+loadfont    movem.l a0-a6,-(a7)
+            move    #1024,d0
+            lea.l   fontstr(pc),a0
+            os9     F$Link
+            bcc.b   loadf1
+            lea.l   locstr(pc),a0
+            os9     F$Load
+            bcs.b   loadf9
+loadf1      lea.l   48(a2),a2
+            move.b  6(a2),fontwidth+1(a5)
+            move.b  8(a2),fontheight+1(a5)
+            lea.l   11(a2),a2
+            move.l  a2,fontadr(a5)
+            clr.b   d1
+loadf9      movem.l (a7)+,a0-a6
+            rts
+
+locstr      dc.b    "/dd/sys/"
+fontstr     dc.b    "stdfonts",0
+            align
+
+initstack   lea.l   winlist(a5),a0
+            moveq   #0,d0
+            moveq   #15,d1
+iwl1        move.b  d0,(a0)+
+            move    d0,d2
+            move.b  #0,winmode(a5,d2.w)     mode=0
+            lsl     #2,d2
+            move.l  #0,winvsect(a5,d2.w)    vsectptr=0
+            addq    #1,d0
+            dbra    d1,iwl1
+            rts
+
+*
+* routines for handling windows
+*
+
+* find window with winnr in d0, return win postion in d1
+findwin     lea.l   winlist(a5),a0          a0->current window list
+            moveq   #0,d1
+findw1      cmp.b   (a0,d1.w),d0            d1 is location in winlist, 0=top
+            beq.s   findw9
+            addq    #1,d1
+            cmpi    #16,d1
+            bne.s   findw1
+            move.l  #193,d1
+            ori     #Carry,ccr
+findw9      rts
+
+* bring window with winnr in d0 to front
+wintop      bsr     findwin
+            bcs.s   wint9                   nu such window
+            tst     d1
+            beq.s   wint9                   already on top
+            subq    #1,d1
+wint1       move.b  (a0,d1.w),1(a0,d1.w)    move windows down the list
+            dbra    d1,wint1
+            move.b  d0,(a0)                 bring this window on top
+            move.b  1(a0),d1                previous in d1
+            lsl     #2,d1                   offset to long vsectptr
+            move.l  winvsect(a5,d1.w),a1    get vsect of previous win in d1
+            beq.s   wint2                   get away when doesn exist
+            clr     focus(a1)               previous no focus
+
+wint2       move.b  d0,d1                   new top window gets focus
+            lsl     #2,d1                   offset to long
+            move.l  winvsect(a5,d1.w),a2    get vsect of this window
+            move    #1,focus(a2)            window has focus
+            bsr     restore                 and bring it to front
+wint9       rts
+
+*
+* create new window and allocate memory for it
+*
+initwin     move.b  PD_BAU-PD_OPT+M$DTyp(a1),d0     window nr
+            bsr     findwin                 valid window nr?
+            bcs     neww9                   no, done
+neww1       tst     d1                      any other windows?
+            beq.s   neww2                   no, branch
+            move.b  -1(a0,d1.w),(a0,d1.w)   all higher windows back 1
+            subq    #1,d1
+            bra.s   neww1
+
+neww2       move.b  d0,(a0,d1.w)            put this new one on top
+            ext.w   d0
+            move    d0,winnr(a2)            save number
+            move.b  #$80,winmode(a5,d0.w)   window initialized
+            lsl     #2,d0
+            move.l  a2,winvsect(a5,d0.w)    store vsect ptr
+            move.l  a2,a1                   vsect ptr in a1
+
+            move    #64,maxcol(a1)
+            move    #32,maxrow(a1)
+            move    #512,width(a1)
+            move    #256,height(a1)
+
+            move    #0,winbcol(a1)
+            move    #$ffff,winfcol(a1)
+            lea.l   screen,a0
+            move.l  a0,winadr(a1)
+            move.l  a0,contentadr(a1)
+            clr     border(a1)              no border
+            move    #1,focus(a1)
+
+            move.l  #(64*32),d0             screen size in chars
+            os9     F$SRqMem                allocate mirror memory
+            bcs     neww9                   exit on error
+            move.l  a2,miradr(a1)           save mirror parameters
+*           move.l  a2,$10000
+            move.l  d0,mirlen(a1)
+            bsr     clrmir                  clear mirror mem
+
+neww9       rts
+
+* draw horizontal line from (a0), lenght d2, color d3
+hline       movem.l d2/a0,-(sp)
+            subq    #1,d2
+hl1         move.b  d3,(a0)+
+            dbra    d2,hl1
+            movem.l (sp)+,d2/a0
+            rts
+
+* draw vertical line from (a0), length d2, color d3
+vline       movem.l d2/a0,-(sp)
+            subq    #1,d2
+vl1         move.b  d3,(a0)
+            adda.l  #512,a0
+            dbra    d2,vl1
+            movem.l (sp)+,d2/a0
+            rts
+
+drawborder  move.l  winadr(a1),a2
+            move    #$ffff,d3
+            move.b  d0,d6
+            move    width(a1),d2
+            moveq   #7,d7
+dblooph1    lsl.b   #1,d6
+            bcc.s   dbnexth1
+            move.l  a2,a0
+            bsr.s   hline
+dbnexth1    adda    #513,a2
+            subq    #2,d2
+            dbra    d7,dblooph1
+
+            move.l  winadr(a1),a2
+            move.b  d0,d6
+            move    height(a1),d2
+            subq    #1,d2
+            mulu    #512,d2
+            adda.l  d2,a2
+            move    width(a1),d2
+            moveq   #7,d7
+dblooph2    lsl.b   #1,d6
+            bcc.s   dbnexth2
+            move.l  a2,a0
+            bsr.s   hline
+dbnexth2    suba    #511,a2
+            subq    #2,d2
+            dbra    d7,dblooph2
+
+            move.l  winadr(a1),a2
+            move.b  d0,d6
+            move    height(a1),d2
+            moveq   #7,d7
+dbloopv1    lsl.b   #1,d6
+            bcc.s   dbnextv1
+            move.l  a2,a0
+            bsr.s   vline
+dbnextv1    adda    #513,a2
+            subq    #2,d2
+            dbra    d7,dbloopv1
+
+            move.l  winadr(a1),a2
+            move.b  d0,d6
+            move    width(a1),d2
+            subq    #1,d2
+            adda    d2,a2
+            move    height(a1),d2
+            moveq   #7,d7
+dbloopv2    lsl.b   #1,d6
+            bcc.s   dbnextv2
+            move.l  a2,a0
+            bsr     vline
+dbnextv2    adda    #511,a2
+            subq    #2,d2
+            dbra    d7,dbloopv2
+            rts
+
+Read        moveq   #0,d1
+            rts
+
+Write       move.l  wdataptr(a2),a5
+            move.l  a2,a1
+            move    ctrl(a5),d1
+            bne.s   getpar
+            cmpi.b  #$1c,d0
+            bne.s   wr1
+            move    d0,ctrl(a5)
+            bra.s   wr9
+wr1         bsr     prchar
+wr9         moveq   #0,d1
+            rts
+
+getpar      tst.l   funptr(a1)
+            beq.s   getfun
+            move    parcnt(a1),d1
+            move.l  bufptr(a1),a0
+            move.b  d0,(a0)+
+            move.l  a0,bufptr(a1)
+            subq    #1,d1
+            move    d1,parcnt(a1)
+            bne     wr9
+
+callfun     move.l  funptr(a1),a0
+            lea.l   buf(a1),a3
+            jsr     (a0)
+            moveq   #0,d1
+            move    d1,ctrl(a5)
+            move.l  d1,funptr(a1)
+            move    d1,parcnt(a1)
+            lea.l   buf(a1),a0
+            move.l  a0,bufptr(a1)
+            rts
+            
+getfun      subi    #$20,d0
+            bmi.s   funerr
+            lsl     #2,d0
+            lea.l   funtbl(pc),a0
+            move    2(a0,d0.w),d1           # parameters expected
+            adda    (a0,d0.w),a0            exec address
+            move.l  a0,funptr(a1)
+            move    d1,parcnt(a1)
+            beq.s   callfun
+            bra     wr9
+
+funerr      move    #195,d1
+            ori     #Carry,ccr
+            rts
+
+funtbl      dc.w    setwin-funtbl,6         $20 x,y,w,h,bg,fg
+            dc.w    selectwin-funtbl,0      $21
+            dc.w    setborder-funtbl,1      $22,s
+            dc.w    setwinfcol-funtbl,1     $22 fg
+            dc.w    setwinbcol-funtbl,1     $23 bg
+            dc.w    setcol-funtbl,1         $24 col
+            dc.w    setrow-funtbl,1         $25 row
+            dc.w    0,0
+
+setwin      move.b  (a3)+,d0
+            ext.w   d0
+            lsl     #3,d0
+            move    d0,winx(a1)             left of window
+            move.b  (a3)+,d0
+            ext.w   d0
+            lsl     #3,d0
+            move    d0,winy(a1)             top of window
+            move.b  (a3)+,d0
+            ext.w   d0
+            move    d0,maxcol(a1)
+            lsl     #3,d0
+            move    d0,width(a1)            width in bytes
+            move.b  (a3)+,d0
+            ext.w   d0
+            move    d0,maxrow(a1)
+            lsl     #3,d0
+            move    d0,height(a1)           height in bytes
+            move.b  (a3)+,d0
+            move.b  d0,winbcol(a1)
+            move.b  d0,winbcol+1(a1)
+            move.b  (a3)+,d0
+            move.b  d0,winfcol(a1)
+            move.b  d0,winfcol+1(a1)
+
+            lea.l   screen,a0               calc window topleft address
+            move    winx(a1),d0
+            adda    d0,a0
+            move    winy(a1),d0
+            mulu    #512,d0
+            adda.l  d0,a0
+            move.l  a0,winadr(a1)
+            move.l  a0,contentadr(a1)       for now no border
+            bsr     clrwin
+            rts
+*
+* bring this window to top and restore contents
+*
+selectwin   move    winnr(a1),d0            this winnr
+            bsr     wintop
+            beq.s   ontop
+            bsr     restore
+ontop       rts
+
+setborder   move.l  winadr(a1),a0
+            add     #(8*512)+8,a0           content = win+(8,8)
+            move.l  a0,contentadr(a1)
+            subi    #2,maxcol(a1)
+            subi    #2,maxrow(a1)
+            move.b  (a3)+,d0
+            andi    #$ff,d0
+            move    d0,border(a1)
+            bsr     drawborder
+            rts
+
+setcol      move.b  buf(a1),col(a1)
+            rts
+
+setrow      move.b  buf(a1),row(a1)
+
+setwinfcol  move.b  buf(a1),d0
+            move.b  d0,winfcol(a1)
+            move.b  d0,winfcol+1(a1)
+            rts
+
+setwinbcol  move.b  buf(a1),d0
+            move.b  d0,winbcol(a1)
+            move.b  d0,winbcol+1(a1)
+            rts
+
+GetStat     cmpi    #SS_Ready,d0
+            bne.s   getopt
+            move    #E$NotRdy,d1
+            bra.s   geterr
+getopt      cmpi    #SS_Opt,d0
+            bne.s   getunk
+            moveq   #0,d1
+            bra.s   getex
+getunk      move    #E$UnkSvc,d1
+geterr      ori     #Carry,ccr
+getex       rts         
+
+SetStat     cmpi    #SS_Open,d0
+            beq.s   setopt
+            cmpi    #SS_Opt,d0
+            bne.s   setssig
+setopt      moveq   #0,d1
+            bra.s   setex
+setssig     cmpi    #SS_SSig,d0
+            bne.s   setunk
+            moveq   #0,d1
+            bra.s   setex
+setunk      move    #E$UnkSvc,d1
+            ori     #Carry,ccr
+setex       rts
+
+
+Term        move.l  wdataptr(a2),a5
+            move    winnr(a2),d0            current windownr in d0
+            bsr     findwin                 find index in winlist a0
+term1       move.b  1(a0,d1.w),(a0,d1.w)    move all windows 1 up
+            addq    #1,d1
+            cmpi    #15,d1
+            bne.s   term1
+            move.b  d0,(a0,d1.w)            and this one last in list
+            move.b  #0,winmode(a5,d0.w)     delete this window
+            lsl     #2,d0
+            move.l  #0,winvsect(a5,d0.w)    and clear its vsect ptr
+            clr     focus(a2)               deactivate it
+            move.l  a2,a1
+            move.l  miradr(a1),a2           get mirror pointer
+            move.l  mirlen(a1),d0
+            os9     F$SRtMem                release memory
+term8       move.l  a1,a2
+            clr     winbcol(a1)             clear screen to background
+            bsr     clrwin
+
+            moveq   #14,d1                  loop over other windows
+term2       move.b  winlist(a5,d1.w),d0
+            ext.w   d0
+            tst.b   winmode(a5,d0.w)        initialized?
+            bpl.s   term3
+            bsr.s   restore                 otherwise restore it
+term3       dbra    d1,term2                next
+
+            move.l  wdatahdr(a1),a2         unlink datmod for this window
+            os9     F$UnLink
+
+term9       moveq   #0,d1
+            rts
+
+*
+* restore the contents of awindow from its mirror
+*
+restore     movem.l d0-d7/a0-a6,-(sp)
+            lsl     #2,d0                   winnr in d0
+            move.l  winvsect(a5,d0.w),a1    get vsect ptr in a1
+            bsr     clrwin
+
+            move    border(a1),d0
+            bsr     drawborder
+
+            move.l  miradr(a1),a3
+            move    maxcol(a1),d6
+            move    maxrow(a1),d7
+            moveq   #0,d2               row 0
+restlin     move.l  a3,a2
+            moveq   #0,d1
+restch      move.b  (a2)+,d0
+            beq.s   restlin1
+            bsr     outchar
+            addq    #1,d1               inc col
+            cmp     d6,d1               col=maxcol?
+            bne.s   restch              no, next char
+restlin1    addq    #1,d2               next row
+            adda.l  #64,a3
+            cmp     d7,d2               row=maxrow?
+            bne.s   restlin             no, next row
+            movem.l (sp)+,d0-d7/a0-a6
+            rts
+
+*
+* clear window content to background color and cursor home
+*
+clrcontent  clr     col(a1)
+            clr     row(a1)
+            move    winbcol(a1),d4
+            movea.l contentadr(a1),a0
+            move    maxcol(a1),d5
+            lsl     #2,d5               width in words
+            subq    #1,d5               correct for dbra
+            move    maxrow(a1),d3       height in lines
+            lsl     #3,d3
+*           mulu    fontheight(a1),d3
+            subq    #1,d3
+            bra.s   clrlin
+
+*
+* clear window incl borders to background color
+*
+clrwin      move    winbcol(a1),d4
+            movea.l winadr(a1),a0
+            move    width(a1),d5
+            lsr     #1,d5               width in words
+            subq    #1,d5               correct for dbra
+            move    height(a1),d3       height in lines
+            subq    #1,d3
+
+clrlin      move.l  a0,a3
+            move    d5,d2
+clrpix      move    d4,(a3)+
+            dbra    d2,clrpix
+            adda    #512,a0
+            dbra    d3,clrlin
+            rts
+
+prchar      cmpi.b  #$09,d0
+            bne.s   prclr
+            move    col(a1),d0
+            addq    #4,d0               tabs every 4 pos
+            andi    #$f8,d0
+            move    d0,col(a1)
+            bra.s   adjust
+
+prclr       cmpi.b  #$0c,d0
+            bne.s   prcr
+            bsr     clrcontent
+            bsr     clrmir
+            bra.s   adjust
+
+prcr        cmp.b   #$0d,d0
+            bne.s   prlf
+            clr     col(a1)
+            addi    #1,row(a1)
+            bra.s   adjust
+
+prlf        cmp.b   #$0a,d0
+            bne.s   prrest
+            addi    #1,row(a1)
+            bra.s   adjust
+
+prrest      cmpi.b  #$12,d0
+            bne.s   prch
+            move    winnr(a1),d0
+            bra     restore
+
+prch        move    col(a1),d1
+            move    row(a1),d2
+            bsr     moutchar
+            bsr     outchar
+prch1       addi    #1,col(a1)
+
+adjust      move    row(a1),d2
+            cmp     maxrow(a1),d2
+            blt.s   adj9
+            subi    #1,row(a1)
+
+scrollup    movea.l contentadr(a1),a0
+            move.l  a0,a2
+            move    fontheight(a5),d2
+            mulu    #512,d2
+            adda.l  d2,a0
+            move    maxrow(a1),d2       max rows-1 on screen
+            subq    #1,d2               scroll all-1 rows
+            lsl     #3,d2               8 bytes/char
+            subq    #1,d2               correct for dbra
+            move    maxcol(a1),d1
+            lsl     #2,d1               d1: # words per line
+            subq    #1,d1               correct for dbra
+scr2        move    d1,d3               use d3 for loop
+            move.l  a0,a3
+            move.l  a2,a4
+scr1        move    (a3)+,(a4)+
+            dbra    d3,scr1
+            adda    #512,a0
+            adda    #512,a2
+            dbra    d2,scr2
+
+eralin      move    winbcol(a1),d4
+            moveq   #7,d2
+scr4        move    d1,d3
+            move.l  a2,a4
+scr3        move    d4,(a4)+
+            dbra    d3,scr3
+            adda.l  #512,a2
+            dbra    d2,scr4
+adj9        rts
+
+crampt      movea.l contentadr(a1),a0
+            cmp     maxcol(a1),d1           char on screen & not blocked?
+            bge.s   cr9
+            lsl     #3,d1                   col
+            adda    d1,a0
+            lsl     #3,d2                   row
+            mulu    #512,d2
+            adda.l  d2,a0
+            rts
+cr9         ori     #1,ccr
+            rts
+
+outchar     movem.l d0-d7/a0-a6,-(sp)
+            bsr     crampt
+            bcs.s   outchar9
+            move    fontwidth(a5),d1        # pixels/char
+            move    #512,d2                 offset to next line
+            sub     d1,d2                   when pointing to next char
+            subq    #1,d1                   because dbra
+            move    fontheight(a5),d3       # scanlines/char
+            move.b  winfcol(a1),d4
+            move.b  winbcol(a1),d5
+            andi    #$ff,d0
+            cmpi.b  #' ',d0
+            beq.s   prspace
+            mulu    d3,d0
+            add.l   fontadr(a5),d0
+            move.l  d0,a3
+            subq    #1,d3
+prline      move.b  (a3)+,d0
+            move    d1,d7
+prcol       move.b  d5,d6
+            lsl.b   #1,d0
+            bcc.s   bit1
+            move.b  d4,d6
+bit1        move.b  d6,(a0)+
+            dbra    d7,prcol
+            adda    d2,a0                   shift to next scanline
+            dbra    d3,prline               next line
+outchar9    movem.l (sp)+,d0-d7/a0-a6
+            rts
+
+prspace     subq    #1,d3
+prsplin     move    d1,d7
+prspcol     move.b  d5,(a0)+
+            dbra    d7,prspcol
+            adda    d2,a0
+            dbra    d3,prsplin
+            bra.s   outchar9
+            
+*
+* routines for mirror screen textmode
+*
+
+clrmir      movem.l a0,-(sp)
+            move.l  miradr(a1),a0
+            move    #31,d6
+mclr1       move.b  #0,(a0)
+            adda    #64,a0
+            dbra    d6,mclr1
+            movem.l (sp)+,a0
+            rts
+
+moutchar    movem.l d1-d2/a0,-(sp)
+            move.l  miradr(a1),a0
+            add     d1,a0                   col in d1
+            mulu    #64,d2                  row in d2, 64 chars/line
+            add.l   d2,a0
+            move.b  d0,(a0)+
+            move.b  #0,(a0)
+            addq    #1,d1
+            cmpi    #64,d1
+            movem.l (sp)+,d1-d2/a0
+            rts
+
+mscrollup   movem.l a0-a3,-(sp)
+            move.l  miradr(a1),a1           a0 -> 1st line
+            move.l  a1,a3                   
+            adda.l  #64,a3                  a2 -> 2nd line
+            move    #30,d7                  31 lines
+mscr1       move    #63,d6                  max 64 chars to scroll
+            move.l  a3,a2
+            move.l  a1,a0
+mscr2       move.b  (a2)+,d0
+            move.b  d0,(a0)+
+            beq.s   mscr3
+            dbra    d6,mscr2
+mscr3       adda    #64,a3
+            adda    #64,a1
+            dbra    d7,mscr1
+            move.b  #0,(a1)                 clear last line
+            movem.l (sp)+,a0-a3
+            rts
+
+            ends
+
+Super: 
